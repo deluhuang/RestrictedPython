@@ -245,3 +245,49 @@ def test_compile_restricted_function_invalid_syntax():
         assert error_msg.startswith(
             "Line 1: SyntaxError: cannot assign to literal at statement:"
         )
+
+
+def test_compile_restricted_function_rejects_newline_in_params():
+    """Newlines in parameters must not inject module-level statements."""
+    p = '):\n pass\ninjected = "PWNED"\ndef f('
+    body = 'return "safe"'
+    name = 'my_func'
+
+    result = compile_restricted_function(p, body, name)
+    assert result.code is None
+    assert result.errors == (
+        'Line 1: parameters must not contain line breaks or '
+        'inject additional statements.',
+    )
+
+
+def test_compile_restricted_function_rejects_code_injection_via_params():
+    """Various code injection attempts via parameter string must be blocked."""
+    p = '):\n import os\n os.system("id")\ndef f('
+    result = compile_restricted_function(p, 'pass', 'test')
+    assert result.code is None
+    assert 'inject additional statements' in result.errors[0]
+
+
+def test_compile_restricted_function_rejects_function_hijack_via_params():
+    """Injecting a same-named function via params must be blocked."""
+    p = '):\n pass\ndef legit():\n return "HIJACKED"\ndef f('
+    result = compile_restricted_function(p, 'return "REAL"', 'legit')
+    assert result.code is None
+    assert 'inject additional statements' in result.errors[0]
+
+
+def test_compile_restricted_function_accepts_valid_params():
+    """Normal parameter strings still work."""
+    for p in ['', 'x', 'x, y', 'x, y=1', '*args', '**kwargs',
+              'x, *args, **kwargs', 'x: int = 0']:
+        result = compile_restricted_function(p, 'return 1', 'f')
+        assert result.errors == (), f"Unexpected error for params {p!r}: {result.errors}"
+        assert result.code is not None
+
+
+def test_compile_restricted_function_syntax_error_in_params():
+    """Invalid syntax in parameter string is handled gracefully."""
+    result = compile_restricted_function(',,', 'pass', 'f')
+    assert result.code is None
+    assert len(result.errors) == 1

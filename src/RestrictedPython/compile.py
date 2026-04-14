@@ -158,8 +158,32 @@ def compile_restricted_function(
     # We don't want the user to need to understand this.
     if globalize:
         body_ast.body.insert(0, ast.Global(globalize))
-    wrapper_ast = ast.parse('def masked_function_name(%s): pass' % p,
-                            '<func wrapper>', 'exec')
+
+    # Validate that the parameter string doesn't inject additional
+    # statements beyond the function definition (e.g. via newlines).
+    try:
+        wrapper_ast = ast.parse(
+            'def masked_function_name(%s): pass' % p,
+            '<func wrapper>', 'exec')
+    except SyntaxError as v:
+        error = syntax_error_template.format(
+            lineno=v.lineno,
+            type=v.__class__.__name__,
+            msg=v.msg,
+            statement=v.text.strip() if v.text else None)
+        return CompileResult(
+            code=None, errors=(error,), warnings=(), used_names=())
+
+    if len(wrapper_ast.body) != 1:
+        return CompileResult(
+            code=None,
+            errors=(
+                'Line 1: parameters must not contain line breaks or '
+                'inject additional statements.',
+            ),
+            warnings=(),
+            used_names=())
+
     # In case the name you chose for your generated function is not a
     # valid python identifier we set it after the fact
     function_ast = wrapper_ast.body[0]

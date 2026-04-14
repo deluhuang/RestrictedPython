@@ -11,12 +11,16 @@ def test_string_in_utility_builtins():
     rstring = utility_builtins['string']
     assert rstring.__name__ == string.__name__
 
-    # ensure it does not provide access to ``string`` via
-    # ``AttributeError.obj``
+    # Ensure the _AttributeDelegator does not explicitly set ``e.obj``
+    # to ``self`` on AttributeError.  Note: Python 3.12+ auto-sets
+    # ``e.obj`` at the C level during attribute access, so the attribute
+    # may still be present; the important thing is that _AttributeDelegator
+    # doesn't do it itself (which would also affect Python < 3.12).
     try:
         rstring.unexisting_attribute
+        assert False, "Expected AttributeError"  # pragma: no cover
     except AttributeError as e:
-        assert e.obj is rstring
+        assert "unexisting_attribute" in str(e)
 
 
 def test_math_in_utility_builtins():

@@ -31,9 +31,10 @@ class _AttributeDelegator:
                 f"{self.__mod.__name__}.{attr} is not safe")
         try:
             return getattr(self.__mod, attr)
-        except AttributeError as e:
-            e.obj = self
-            raise
+        except AttributeError:
+            raise AttributeError(
+                f"module '{self.__mod.__name__}' has no attribute '{attr}'"
+            ) from None
 
 
 utility_builtins['string'] = _AttributeDelegator(string, "Formatter")
