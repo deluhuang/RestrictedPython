@@ -503,7 +503,7 @@ def test_full_write_guard__wrapper_structure_is_opaque():
     - 包装后 Wrapper.__dict__ 仅含 '_ob'（下划线前缀，外部不可访问）
     - 不可信代码无法通过 safer_getattr 读取 _ob 来恢复原始对象
     """
-    # dict and list are safeypes — returned as-is, not wrapped
+    # dict and list are safetypes — returned as-is, not wrapped
     assert full_write_guard({}) is not None
     assert type(full_write_guard({})) is dict
     assert type(full_write_guard([])) is list
