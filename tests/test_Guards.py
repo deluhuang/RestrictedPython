@@ -1,6 +1,7 @@
 import pytest
 
 from RestrictedPython import compile_restricted_exec
+from RestrictedPython.Guards import full_write_guard
 from RestrictedPython.Guards import guarded_unpack_sequence
 from RestrictedPython.Guards import safe_builtins
 from RestrictedPython.Guards import safe_globals
@@ -365,3 +366,158 @@ def test_safer_getattr__underscore_name():
     assert (
         '"__class__" is an invalid attribute name because it starts with "_"'
         == str(err.value))
+
+
+# ---------------------------------------------------------------------------
+# Security: full_write_guard wrapper must not leak the original object
+# ---------------------------------------------------------------------------
+# 安全说明（中文）：
+# full_write_guard 的设计意图是作为 _write_ 钩子，在受限代码执行写操作（如
+# setattr/delattr/setitem/delitem）时临时包装目标对象，检查其是否声明了
+# __guarded_writes__，从而拒绝对未声明保护的对象执行写操作。
+#
+# Wrapper 实例从未被设计为直接暴露给不可信代码。如果调用者错误地把
+#   wrapped = full_write_guard(sensitive_obj)
+# 塞入受限脚本的 globals/locals，则受限代码原本可以通过访问 wrapped.ob
+# 来恢复原始敏感对象（.ob 不以下划线开头，safer_getattr 不会拦截它）。
+#
+# 本修复将 Wrapper 内部属性由 `ob` 重命名为 `_ob`（下划线前缀），使得
+# safer_getattr 会因 "_ob".startswith("_") 而拒绝访问，从而防止泄漏。
+# ---------------------------------------------------------------------------
+
+
+class _SensitiveObject:
+    """Simulates a sensitive host object (e.g. hass, db connection)."""
+
+    secret = "CLASSIFIED"
+
+    def get_secret(self):
+        return self.secret
+
+
+def test_full_write_guard__wrapper_ob_not_accessible_via_safer_getattr():
+    """Wrapper._ob is not reachable from restricted code via safer_getattr.
+
+    安全 PoC（无害版）：验证修复后 wrapper 对象内部的 _ob 属性无法被
+    safer_getattr 访问，因为属性名以下划线开头会被拦截。
+    这确保了即使误将 full_write_guard(sensitive_obj) 的返回值暴露给
+    不可信代码，攻击者也无法通过 ._ob 恢复原始敏感对象。
+    旧属性名 'ob' 也不再存在于 Wrapper.__dict__ 中，确保无法通过该路径泄漏。
+    """
+    from RestrictedPython.Guards import safer_getattr_raise
+
+    sensitive = _SensitiveObject()
+    wrapped = full_write_guard(sensitive)
+
+    # The internal attribute is now stored as _ob (underscore-prefixed).
+    # safer_getattr must block it due to the underscore prefix rule.
+    with pytest.raises(AttributeError) as excinfo:
+        safer_getattr(wrapped, '_ob')
+    assert '"_ob" is an invalid attribute name' in str(excinfo.value)
+
+    # The old attribute name 'ob' no longer exists on the wrapper.
+    # safer_getattr_raise (which has no default) must raise AttributeError.
+    with pytest.raises(AttributeError):
+        safer_getattr_raise(wrapped, 'ob')
+
+
+def test_full_write_guard__wrapper_ob_not_accessible_from_restricted_code():
+    """Restricted code cannot recover the original object from a wrapper.
+
+    安全 PoC：通过受限执行环境验证，即使将 wrapper 实例直接放入受限脚本的
+    globals，受限代码也无法通过任何公开属性路径访问到原始敏感对象。
+
+    修复前（ob）：safer_getattr(wrapped, 'ob') 返回原始对象 → 敏感数据泄漏。
+    修复后（_ob）：
+      - 'ob' 不再存在，safer_getattr 返回 None（内置默认值）。
+      - '_ob' 因下划线前缀被 safer_getattr 拦截，抛出 AttributeError。
+    两条路径均不会泄漏原始敏感对象。
+    """
+    sensitive = _SensitiveObject()
+    wrapped = full_write_guard(sensitive)
+
+    # Mimic a downstream misuse pattern: wrapper placed directly in globals.
+    # After the fix, getattr(wrapped, 'ob') returns None (ob no longer exists).
+    # The restricted code detects raw is None and records 'ob_gone'.
+    poc_code = """
+try:
+    raw = getattr(wrapped, 'ob')
+    if raw is None:
+        result = 'ob_gone'
+    else:
+        result = 'LEAKED'
+except AttributeError:
+    result = 'blocked'
+"""
+    compiled = compile_restricted_exec(poc_code)
+    assert compiled.errors == ()
+
+    glb = {
+        '__builtins__': safe_builtins,
+        'wrapped': wrapped,
+        'result': None,
+        'getattr': safer_getattr,
+    }
+    exec(compiled.code, glb)
+    # 'ob' is gone from the wrapper — the original object is not accessible.
+    assert glb['result'] in ('ob_gone', 'blocked')
+    # The secret must not have leaked.
+    assert glb['result'] != sensitive.secret
+    assert glb['result'] != 'LEAKED'
+
+
+def test_full_write_guard__wrapper_underscore_ob_blocked_from_restricted_code():
+    """Restricted code cannot access ._ob either (underscore guard applies).
+
+    安全 PoC：验证重命名后的 _ob 属性也无法从受限代码中访问。
+    """
+    sensitive = _SensitiveObject()
+    wrapped = full_write_guard(sensitive)
+
+    poc_code = """
+try:
+    raw = getattr(wrapped, '_ob')
+    result = raw.secret
+except AttributeError:
+    result = 'blocked'
+"""
+    result = compile_restricted_exec(poc_code)
+    assert result.errors == ()
+
+    glb = {
+        '__builtins__': safe_builtins,
+        'wrapped': wrapped,
+        'result': None,
+        'getattr': safer_getattr,
+    }
+    exec(result.code, glb)
+    assert glb['result'] == 'blocked'
+
+
+def test_full_write_guard__wrapper_structure_is_opaque():
+    """PoC: documents the wrapper structure for analysis.
+
+    wrapper 结构分析（无害 PoC）：
+    - type(wrapped)  → Wrapper（不是原始类型）
+    - safetype 检查：dict/list 直接返回，其他类型返回 Wrapper 实例
+    - 包装后 Wrapper.__dict__ 仅含 '_ob'（下划线前缀，外部不可访问）
+    - 不可信代码无法通过 safer_getattr 读取 _ob 来恢复原始对象
+    """
+    # dict and list are safetypes — returned as-is, not wrapped
+    assert full_write_guard({}) is not None
+    assert type(full_write_guard({})) is dict
+    assert type(full_write_guard([])) is list
+
+    # Custom objects are wrapped
+    sensitive = _SensitiveObject()
+    wrapped = full_write_guard(sensitive)
+    assert type(wrapped).__name__ == 'Wrapper'
+
+    # Internal storage: only _ob exists, not ob
+    assert '_ob' in wrapped.__dict__
+    assert 'ob' not in wrapped.__dict__
+
+    # The wrapped._ob is the original object (accessible to trusted Python code)
+    assert wrapped.__dict__['_ob'] is sensitive
+    assert wrapped.__dict__['_ob'].secret == 'CLASSIFIED'
+

@@ -25,10 +25,6 @@ restrict the access to the builtins provided by Python.
 Guards
 ......
 
-.. todo::
-
-    Describe Guards and predefined guard methods in details
-
 RestrictedPython predefines several guarded access and manipulation methods:
 
 * ``safer_getattr``
@@ -37,11 +33,10 @@ RestrictedPython predefines several guarded access and manipulation methods:
 * ``guarded_iter_unpack_sequence``
 * ``guarded_unpack_sequence``
 
-Those and additional methods rely on a helper construct ``full_write_guard``, which is intended to help implement immutable and semi mutable objects and attributes.
-
-.. todo::
-
-    Describe full_write_guard more in detail and how it works.
+Those and additional methods rely on a helper construct ``full_write_guard``,
+which is intended to be used **as the value of** ``_write_`` in restricted
+execution globals.  See the `Guards`_ section under *Examples* below for
+correct usage and important security caveats.
 
 Implementing a policy
 ---------------------
@@ -171,67 +166,50 @@ unsafe operations, such as opening files:
 Guards
 ......
 
-Here's an example of a write guard that never lets restricted code
-modify (assign, delete an attribute or item) except dictionaries and
-lists:
+``full_write_guard`` is a callable that is intended to be used **only** as
+the value of ``_write_`` in the restricted execution globals.  It is **not**
+an object-capability wrapper and must not be used to pre-wrap objects before
+placing them into the restricted globals or locals.
 
-.. code-block:: pycon
+The restricted compiler rewrites every write operation to call ``_write_``:
 
-    >>> from RestrictedPython.Guards import full_write_guard
-    >>> _write_ = full_write_guard
-    >>> _getattr_ = getattr
+.. code-block:: python
 
-    >>> class BikeShed(object):
-    ...     colour = 'green'
-    ...
-    >>> shed = BikeShed()
+    # Original restricted source:
+    x.attr = value
 
-Normally accessing attributes works as expected, because we're using
-the standard ``getattr`` function for the ``_getattr_`` guard:
+    # Compiled form (approximately):
+    _write_(x).attr = value
 
-.. code-block:: pycon
+``_write_`` receives the target object, checks whether mutations are
+permitted (based on ``type(obj)`` being a safe type or ``obj._guarded_writes``
+being set), and either returns the object or a transient ``Wrapper`` that
+raises ``TypeError`` if a write is attempted.  The ``Wrapper`` is discarded
+immediately after the operation.
 
-    >>> src = '''
-    ... print(shed.colour)
-    ... result = printed
-    ... '''
-    >>> code = compile_restricted(src, '<string>', 'exec')
-    >>> exec(code)
+.. warning::
 
-    >>> result
-    'green\n'
+   **Wrapper instances must never be exposed to untrusted code.**
 
-However, changing an attribute doesn't work:
+   Calling ``full_write_guard(obj)`` and passing the returned ``Wrapper``
+   directly to restricted code allows the untrusted script to observe the
+   internal structure of the wrapper and, before this fix was applied,
+   to recover the original wrapped object via the ``.ob`` attribute.
+   The internal reference is now stored under the underscore-prefixed name
+   ``_ob``, which ``safer_getattr`` refuses to expose, but the fundamental
+   rule remains: do not expose wrappers to untrusted code.
 
-.. code-block:: pycon
+   Correct usage::
 
-    >>> src = '''
-    ... shed.colour = 'red'
-    ... '''
-    >>> code = compile_restricted(src, '<string>', 'exec')
-    >>> exec(code)
-    Traceback (most recent call last):
-      ...
-    TypeError: attribute-less object (assign or del)
+       restricted_globals = {
+           '__builtins__': safe_builtins,
+           '_write_': full_write_guard,   # ← assign the guard, not a wrapper
+           '_getattr_': safer_getattr,
+       }
+       exec(compiled_code, restricted_globals, {'my_obj': my_obj})
 
-As said, this particular write guard (``full_write_guard``) will allow
-restricted code to modify lists and dictionaries:
+   Incorrect usage (do not do this)::
 
-.. code-block:: pycon
+       wrapped = full_write_guard(my_obj)          # creates a Wrapper instance
+       restricted_globals['my_obj'] = wrapped      # ← exposes Wrapper to untrusted code
 
-    >>> fibonacci = [1, 1, 2, 3, 4]
-    >>> transl = dict(one=1, two=2, tres=3)
-    >>> src = '''
-    ... # correct mistake in list
-    ... fibonacci[-1] = 5
-    ... # one item doesn't belong
-    ... del transl['tres']
-    ... '''
-    >>> code = compile_restricted(src, '<string>', 'exec')
-    >>> exec(code)
-
-    >>> fibonacci
-    [1, 1, 2, 3, 5]
-
-    >>> sorted(transl.keys())
-    ['one', 'two']
