@@ -175,7 +175,7 @@ def _write_wrapper():
         # Make a class method.
         def handler(self, *args):
             try:
-                f = getattr(self.ob, secattr)
+                f = getattr(self._ob, secattr)
             except AttributeError:
                 raise TypeError(error_msg)
             f(*args)
@@ -183,7 +183,10 @@ def _write_wrapper():
 
     class Wrapper:
         def __init__(self, ob):
-            self.__dict__['ob'] = ob
+            # Store as _ob (underscore-prefixed) so that safer_getattr blocks
+            # restricted code from recovering the original object via .ob.
+            # Wrapper instances must never be exposed to untrusted code.
+            self.__dict__['_ob'] = ob
 
         __setitem__ = _handler(
             '__guarded_setitem__',

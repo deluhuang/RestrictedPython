@@ -4,7 +4,23 @@ Changes
 8.2 (unreleased)
 ----------------
 
-- Nothing changed yet.
+- **Security fix**: Renamed the internal ``ob`` attribute of the ``Wrapper``
+  class (created by ``full_write_guard``) to ``_ob``.  Because ``ob`` did not
+  start with an underscore, ``safer_getattr`` would not block access to it,
+  allowing untrusted code that obtained a ``Wrapper`` instance to recover the
+  original wrapped object via ``getattr(wrapper, 'ob')``.  The new name
+  ``_ob`` is unconditionally rejected by ``safer_getattr``.
+
+  Note that exposing ``Wrapper`` instances to untrusted code has always been
+  incorrect usage — ``full_write_guard`` is designed to be used **only** as
+  the value of ``_write_`` in the restricted execution globals, not to
+  pre-wrap objects before passing them to restricted code.  The documentation
+  has been updated accordingly.
+
+- Updated ``docs/usage/policy.rst``: removed the misleading doctest-style
+  ``Guards`` example that ran ``exec(code)`` without an explicit restricted
+  globals dict; replaced with clear prose, a security warning, and correct
+  usage examples showing ``_write_ = full_write_guard``.
 
 8.1 (2025-10-19)
 ----------------
